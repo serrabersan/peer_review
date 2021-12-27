@@ -1,0 +1,175 @@
+---
+title: "Practical Machine Learning: Prediction Assignment Writeup"
+author: "Serra Gengec"
+date: "22 12 2021"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+## Uploading the Dataset
+
+```{r, echo=FALSE}
+library(caret)
+library(DataExplorer)
+library(pROC)
+library(gbm)
+```
+
+```{r}
+traindata <- read.csv("pml-training.csv", na.strings=c("NA"))
+validation <- read.csv("pml-testing.csv", na.strings=c("NA","#DIV/0!"))
+```
+
+## Expolatory Analysis
+
+The DataExplorer library is used to summarize the classes in the data as well as the missing values. The plot below shows that nearly 94% of all variables are continuous and more than half of the observations are missing. The summary also shows that the data do not include complete rows, so it is necessary to remove the variables with no observations. 
+
+```{r, echo=FALSE}
+plot_intro(traindata)
+```
+
+## Preprocessing
+
+In the pre-processing step first the features with near-zero variances and the irrelevant variables are filtered. In addition to this filtering, the rows with NA observations are also removed. The same variables will be removed from the validation set as well as the problem_id column in this set.
+
+```{r}
+filterData <- traindata[, 7:160]
+filterValidation <- validation[, 7:160]
+nzvt <- nearZeroVar(filterData)
+filterData <- filterData[, -nzvt]
+filterValidation <- filterValidation[, -nzvt]
+
+nzvtv <- nearZeroVar(filterValidation)
+filterData <- filterData[, -nzvtv]
+filterValidation <- filterValidation[, -nzvtv]
+
+completedata<- na.omit(filterData) 
+dim(completedata)
+```
+
+The next step is the analysis of correlated variables and limiting the correlation between variables to maximum 75%.
+
+```{r}
+descrCor <- cor(completedata[, 1:(dim(completedata)[2]-1)])
+summary(descrCor[upper.tri(descrCor)])
+
+highlyCorDescr <- findCorrelation(descrCor, cutoff = .75)
+filteredNewData <- completedata[,-highlyCorDescr]
+descrCor2 <- cor(filteredNewData[, 1:(dim(filteredNewData)[2]-1)])
+summary(descrCor2[upper.tri(descrCor2)])
+
+dim(filteredNewData)
+
+newValidation <- filterValidation[,-highlyCorDescr]
+newValidation <- newValidation[, 1:(dim(newValidation)[2]-1)]
+```
+
+
+In the end the classe variable in training data is distributed as below. While moving forward the classe variable will be a factor variable with 5 levels.
+
+```{r}
+filteredNewData$classe <- as.factor(filteredNewData$classe)
+summary(filteredNewData$classe)
+percentage <- prop.table(table(completedata$classe)) * 100
+cbind(freq=table(completedata$classe), percentage=percentage)
+```
+
+In the last step of pre-processing, the final data set prepared will be parted to training and test sets.
+
+```{r}
+set.seed(7)
+inTrain = createDataPartition(filteredNewData$class, p = 3/4, list = FALSE)
+training = filteredNewData[ inTrain,]
+testing = filteredNewData[-inTrain,]
+```
+
+## Building the Models
+For the model building, 5 methods will be applied and compared, the best model will be selected to further analysis. The training will be done with cross validation for 10 folds. 
+
+### Fitting the models and comparing with resamples()
+
+```{r}
+control <- trainControl(method="cv", number=10, classProbs =  TRUE)
+
+# train the K-Nearest Neighbors model
+set.seed(7)
+knnFit <- train(classe~., data=training, method="knn", trControl=control, preProc = c("center", "scale"))
+
+# train the Naive Bayes model
+set.seed(7)
+nbFit <- train(classe~., data=training, method="naive_bayes", trControl=control)
+
+# train the Classification Tree model
+set.seed(7)
+cartFit <- train(classe~., data=training, method="rpart", trControl=control)
+
+# train the Stochastic Gradient Boosting model
+set.seed(7)
+gbmFit <- train(classe~., data=training, method="gbm", trControl=control, verbose = FALSE)
+
+# train the Random Forest model
+set.seed(7)
+rfFit <- train(classe~., data=training, method="rf", trControl=control, importance = TRUE)
+
+# collect resamples
+results <- resamples(list(KNN=knnFit, NB=nbFit, CART=cartFit, GBM = gbmFit, RF = rfFit))
+# summarize the distributions
+summary(results)
+# boxplots of results
+bwplot(results)
+
+```
+
+As it can be seen in the plots, GBM and Random Forest models performed better on the training set. These two models will be compared according to the test set prediction performances. 
+
+### Predictions on the Test Set
+
+```{r}
+
+gbm_pred <- predict(gbmFit, newdata=testing)
+# Check model performance
+confusionMatrix(gbm_pred,testing$classe)
+
+gbm_prob <- predict(gbmFit, newdata=testing, type = "prob")
+gbm_auc <- multiclass.roc(testing$classe, gbm_prob)
+print(gbm_auc$auc)
+
+rf_pred <- predict(rfFit, newdata=testing)
+# Check model performance
+confusionMatrix(rf_pred,testing$classe)
+
+rf_prob <- predict(rfFit, newdata=testing, type = "prob")
+rf_auc <- multiclass.roc(testing$classe, rf_prob)
+print(rf_auc$auc)
+```
+
+When the two models are compared the Random Forest model perfroms better both in accuracy and AUC metrics. Random Forest model will be used moving forward.
+
+### Details of the RF model
+
+The top 10 variables importance in the model is given in the plot below with the details of the fitted model. 
+```{r}
+plot(varImp(rfFit),top=10) 
+print(rfFit)
+```
+
+## Predictions for the Validation Set
+
+The predictions are made for the validation set with the selected GBM model.
+
+```{r}
+
+finalPred <- predict(rfFit, newdata=newValidation)
+print(finalPred)
+```
+
+
